@@ -126,6 +126,17 @@ textarea{resize:vertical;min-height:72px}
 .stack{display:flex;flex-direction:column;gap:8px}
 a{color:var(--brand)}
 
+/* 식약처 DB 시트 */
+.dbbtn{width:100%;margin-top:8px;padding:8px 12px;font-size:14px}
+.sheet{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.45);z-index:30;display:none;align-items:flex-end;justify-content:center}
+.sheet.on{display:flex}
+.sheet .box{background:var(--surface);width:100%;max-width:560px;max-height:88%;border-radius:18px 18px 0 0;padding:16px 14px calc(16px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:10px}
+.sheet .list{overflow:auto;flex:1;min-height:120px}
+.cand{display:block;width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);padding:10px 0;cursor:pointer}
+.cand:first-child{border-top:0}
+.warn{color:var(--danger)}
+.testout{margin-top:8px;font-size:13px;white-space:pre-wrap;word-break:break-all}
+
 /* 하단 탭 */
 nav{
   position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--line);
@@ -244,6 +255,20 @@ nav button.on{color:var(--brand);font-weight:700;box-shadow:inset 0 3px 0 var(--
       <div class="field"><label for="model">모델 이름</label><input id="model" autocomplete="off"></div>
       <div class="muted">모델이 종료되거나 오류가 나면 위 이름을 최신 무료 Flash 모델로 바꿔 주세요.</div>
     </div>
+    <div class="card">
+      <h2>식약처 식품영양성분DB</h2>
+      <div class="field">
+        <label for="mfdsKey">공공데이터포털 인증키 (Decoding)</label>
+        <input id="mfdsKey" type="password" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="mfdsProxy">프록시 주소 (브라우저 호출이 막힐 때 사용)</label>
+        <input id="mfdsProxy" type="url" autocomplete="off" placeholder="https://이름.계정.workers.dev">
+        <div class="muted" style="margin-top:6px">프록시를 쓰면 위 인증키 칸은 비워도 돼요. 인증키는 프록시 쪽에 저장됩니다.</div>
+      </div>
+      <button class="btn ghost" id="testMfds" style="width:100%">연결 테스트</button>
+      <div class="testout muted" id="testOut"></div>
+    </div>
     <button class="btn" id="saveSettings" style="width:100%;margin-bottom:12px">설정 저장</button>
 
     <div class="card">
@@ -265,6 +290,13 @@ nav button.on{color:var(--brand);font-weight:700;box-shadow:inset 0 3px 0 var(--
   <button data-tab="history">식단</button>
   <button data-tab="settings">설정</button>
 </nav>
+<div class="sheet" id="dbSheet">
+  <div class="box">
+    <div class="row"><h2 class="grow" style="margin:0">식약처 DB에서 찾기</h2><button class="btn ghost" id="dbClose">닫기</button></div>
+    <div id="dbSearchRow" class="row"><input class="grow" id="dbq" placeholder="음식 이름"><button class="btn" id="dbGo">검색</button></div>
+    <div class="list" id="dbBody"></div>
+  </div>
+</div>
 <div class="toast" id="toast" role="status"></div>
 
 <script>
@@ -297,7 +329,7 @@ function toast(msg){
 /* ---------- 저장소 ---------- */
 var KEY='diet_v1';
 function defaults(){
-  return {weights:{},meals:[],cache:{},settings:{apiKey:'',model:'gemini-2.5-flash',goalWeight:'',goalKcal:''}};
+  return {weights:{},meals:[],cache:{},settings:{apiKey:'',mfdsKey:'',mfdsProxy:'',model:'gemini-3.5-flash',goalWeight:'',goalKcal:''}};
 }
 function load(){
   try{
@@ -447,18 +479,26 @@ async function askGemini(text){
     '형식: [{"name":"음식명 (양)","kcal":숫자,"carb":숫자,"protein":숫자,"fat":숫자}]\n'+
     'kcal은 kcal 단위, carb(탄수화물)/protein(단백질)/fat(지방)은 g 단위 정수로 답하세요. 글에 적힌 음식마다 항목을 하나씩 만드세요.\n'+
     '입력: '+text;
-  var res;
-  try{
-    res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(s.model||'gemini-2.5-flash')+':generateContent',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-goog-api-key':s.apiKey},
-      body:JSON.stringify({
-        contents:[{parts:[{text:prompt}]}],
-        generationConfig:{temperature:0.2,responseMimeType:'application/json'}
-      })
-    });
-  }catch(e){
-    throw new Error('인터넷 연결을 확인해 주세요');
+  var res, tries=3;
+  for(var n=1;n<=tries;n++){
+    try{
+      res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(s.model||'gemini-3.5-flash')+':generateContent',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-goog-api-key':s.apiKey},
+        body:JSON.stringify({
+          contents:[{parts:[{text:prompt}]}],
+          generationConfig:{temperature:0.2,responseMimeType:'application/json'}
+        })
+      });
+    }catch(e){
+      throw new Error('인터넷 연결을 확인해 주세요');
+    }
+    if((res.status===503||res.status===500) && n<tries){
+      setStatus('서버가 바빠 다시 시도하고 있어요 ('+(n+1)+'/'+tries+')');
+      await new Promise(function(r){ setTimeout(r,2000*n); });
+      continue;
+    }
+    break;
   }
   if(!res.ok){
     var msg='';
@@ -466,6 +506,7 @@ async function askGemini(text){
     if(res.status===429) throw new Error('무료 사용 한도를 넘었어요. 잠시 후 다시 시도하거나 직접 입력하세요');
     if(res.status===400 || res.status===403) throw new Error('API 키를 확인해 주세요. '+msg.slice(0,80));
     if(res.status===404) throw new Error('모델 이름을 찾을 수 없어요. 설정에서 모델 이름을 바꿔 주세요');
+    if(res.status===503) throw new Error('Google 서버가 바빠요. 잠시 뒤 다시 시도하거나 직접 입력하세요');
     throw new Error('분석에 실패했어요 ('+res.status+')');
   }
   var data=await res.json();
@@ -519,7 +560,7 @@ function renderPreview(){
     return '<div class="prow"><div class="top">'+
       '<input data-i="'+i+'" data-f="name" value="'+esc(it.name)+'" placeholder="음식 이름">'+
       '<button data-rm="'+i+'" aria-label="항목 삭제">×</button></div>'+
-      '<div class="grid">'+f('kcal','kcal')+f('carb','탄수(g)')+f('protein','단백(g)')+f('fat','지방(g)')+'</div></div>';
+      '<div class="grid">'+f('kcal','kcal')+f('carb','탄수(g)')+f('protein','단백(g)')+f('fat','지방(g)')+'</div><button class="btn ghost dbbtn" data-db="'+i+'">식약처 DB에서 찾기</button></div>';
   }).join('');
   updatePTotal();
 }
@@ -534,6 +575,8 @@ $('#preview').addEventListener('input',function(e){
   updatePTotal();
 });
 $('#preview').addEventListener('click',function(e){
+  var dbi=e.target.getAttribute('data-db');
+  if(dbi!=null){ openDbSheet(+dbi); return; }
   var rm=e.target.getAttribute('data-rm'); if(rm==null) return;
   preview.splice(+rm,1);
   if(!preview.length) cancelPreview(); else renderPreview();
@@ -670,19 +713,21 @@ $('#history').addEventListener('click',function(e){
 function renderSettings(){
   var s=db.settings;
   $('#goalWeight').value=s.goalWeight; $('#goalKcal').value=s.goalKcal;
-  $('#apiKey').value=s.apiKey; $('#model').value=s.model;
+  $('#apiKey').value=s.apiKey; $('#model').value=s.model; $('#mfdsKey').value=s.mfdsKey||''; $('#mfdsProxy').value=s.mfdsProxy||'';
 }
 $('#saveSettings').onclick=function(){
   db.settings.goalWeight=$('#goalWeight').value.trim();
   db.settings.goalKcal=$('#goalKcal').value.trim();
   db.settings.apiKey=$('#apiKey').value.trim();
-  db.settings.model=$('#model').value.trim()||'gemini-2.5-flash';
+  db.settings.mfdsKey=$('#mfdsKey').value.trim();
+  db.settings.mfdsProxy=$('#mfdsProxy').value.trim();
+  db.settings.model=$('#model').value.trim()||'gemini-3.5-flash';
   save(); renderRecord(); toast('설정을 저장했어요');
 };
 
 $('#exportBtn').onclick=function(){
   var copy=JSON.parse(JSON.stringify(db));
-  copy.settings.apiKey='';
+  copy.settings.apiKey=''; copy.settings.mfdsKey='';
   var blob=new Blob([JSON.stringify(copy,null,1)],{type:'application/json'});
   var a=document.createElement('a');
   a.href=URL.createObjectURL(blob); a.download='diet-backup-'+today()+'.json';
@@ -699,9 +744,9 @@ $('#importFile').onchange=function(e){
       var o=JSON.parse(r.result);
       if(!o||typeof o.weights!=='object'||!Array.isArray(o.meals)) throw new Error('bad');
       if(!confirm('현재 기록을 가져온 파일의 내용으로 바꿀까요?')) return;
-      var key=db.settings.apiKey, d=defaults();
+      var key=db.settings.apiKey, mkey=db.settings.mfdsKey, d=defaults();
       d.weights=o.weights; d.meals=o.meals; d.cache=o.cache||{};
-      d.settings=Object.assign(d.settings,o.settings||{},{apiKey:key});
+      d.settings=Object.assign(d.settings,o.settings||{},{apiKey:key,mfdsKey:mkey});
       db=d; save(); renderAll(); renderSettings(); toast('백업을 가져왔어요');
     }catch(err){ toast('올바른 백업 파일이 아니에요'); }
   };
@@ -710,6 +755,158 @@ $('#importFile').onchange=function(e){
 $('#clearCacheBtn').onclick=function(){
   if(!confirm('저장해 둔 분석 결과를 모두 비울까요? (기록은 지워지지 않아요)')) return;
   db.cache={}; save(); toast('비웠어요');
+};
+
+/* ---------- 식약처 식품영양성분DB ---------- */
+var MFDS_URL='https://apis.data.go.kr/1471000/FoodNtrCpntDbInfo02/getFoodNtrCpntDbInq02';
+// 영양성분 번호 매핑 (응답 필드가 다르면 여기만 고치면 됩니다)
+var NUT={kcal:'AMT_NUM1',protein:'AMT_NUM3',fat:'AMT_NUM4',carb:'AMT_NUM6'};
+
+function mfdsKey(){
+  var k=(db.settings.mfdsKey||'').trim();
+  if(k.indexOf('%')>=0){ try{ k=decodeURIComponent(k); }catch(e){} }
+  return k;
+}
+function pick(it,keys){
+  for(var i=0;i<keys.length;i++){ if(it[keys[i]]!=null && it[keys[i]]!=='') return it[keys[i]]; }
+  return '';
+}
+function normItem(it){
+  it.FOOD_NM_KR=pick(it,['FOOD_NM_KR','foodNm','DESC_KOR']);
+  it.NUTRI_AMOUNT_SERVING=pick(it,['NUTRI_AMOUNT_SERVING','nutConSrtrQua']);
+  it.SERVING_SIZE=pick(it,['SERVING_SIZE','servSize']);
+  it.DB_GRP_NM=pick(it,['DB_GRP_NM','foodLv3Nm','DB_CLASS_NM']);
+  it.AMT_NUM1=pick(it,['AMT_NUM1','enerc','ENERC']);
+  it.AMT_NUM3=pick(it,['AMT_NUM3','prot','PROT']);
+  it.AMT_NUM4=pick(it,['AMT_NUM4','fatce','FATCE']);
+  it.AMT_NUM6=pick(it,['AMT_NUM6','chocdf','CHOCDF']);
+  return it;
+}
+function num(v){ var n=parseFloat(String(v==null?'':v).replace(/,/g,'')); return isNaN(n)?0:n; }
+function gramsOf(s){ var m=String(s||'').match(/[\d.]+/); return m?parseFloat(m[0]):0; }
+function baseOf(it){ return gramsOf(it.NUTRI_AMOUNT_SERVING)||gramsOf(it.SERVING_SIZE)||100; }
+function unitOf(it){ return /ml/i.test(String(it.NUTRI_AMOUNT_SERVING||it.SERVING_SIZE||''))?'mL':'g'; }
+function defAmount(it){ return gramsOf(it.Z10500)||gramsOf(it.DISH_ONE_SERVING)||baseOf(it); }
+function calc(it,g){
+  var base=baseOf(it), f=g/base;
+  return {kcal:num(it[NUT.kcal])*f,carb:num(it[NUT.carb])*f,protein:num(it[NUT.protein])*f,fat:num(it[NUT.fat])*f};
+}
+function suspicious(v){
+  var e=v.carb*4+v.protein*4+v.fat*9;
+  return v.kcal>20 && Math.abs(e-v.kcal)/v.kcal>0.4;
+}
+
+async function mfdsSearch(q){
+  var key=mfdsKey();
+  var proxy=(db.settings.mfdsProxy||'').trim();
+  if(!proxy && !key) throw new Error('설정 탭에서 식약처 인증키나 프록시 주소를 입력해 주세요');
+  var url=proxy
+    ? proxy+(proxy.indexOf('?')>=0?'&':'?')+'q='+encodeURIComponent(q)
+    : MFDS_URL+'?serviceKey='+encodeURIComponent(key)+'&type=json&pageNo=1&numOfRows=30&FOOD_NM_KR='+encodeURIComponent(q);
+  var res;
+  try{ res=await fetch(url); }
+  catch(e){
+    throw new Error(proxy
+      ? '프록시에 연결하지 못했어요. 프록시 주소를 확인하고, 이 앱의 주소('+location.origin+')가 프록시의 ALLOWED_ORIGIN과 같은지 확인해 주세요.'
+      : '식약처 서버에 연결하지 못했어요. 인터넷이 정상이라면 브라우저가 호출을 막은 것일 수 있어요(CORS). 프록시 주소를 설정해 주세요.');
+  }
+  var text=await res.text(), data;
+  if(proxy && res.status===403) throw new Error('프록시가 이 앱 주소를 허용하지 않아요. Cloudflare의 ALLOWED_ORIGIN 값을 '+location.origin+' 으로 맞춰 주세요.');
+  try{ data=JSON.parse(text); }
+  catch(e){
+    var m=text.match(/<returnAuthMsg>([^<]+)/)||text.match(/<errMsg>([^<]+)/)||text.match(/<resultMsg>([^<]+)/);
+    throw new Error(m?('식약처 응답: '+m[1]):('응답을 읽지 못했어요 ('+res.status+')'));
+  }
+  var root=data.response||data;
+  var header=root.header||{}, body=root.body||{};
+  if(header.resultCode && String(header.resultCode)!=='00') throw new Error('식약처 응답: '+(header.resultMsg||header.resultCode));
+  var items=body.items;
+  if(items && items.item) items=items.item;
+  if(!Array.isArray(items)) items=items?[items]:[];
+  return items.map(normItem);
+}
+
+var dbIdx=null, dbResults=[], dbSel=null;
+function showSheet(on){ $('#dbSheet').classList.toggle('on',on); }
+function openDbSheet(i){
+  dbIdx=i; dbSel=null;
+  var q=String(preview[i].name||'').replace(/\(.*?\)/g,'').replace(/\d[\d.]*\s*\S*$/,'').trim();
+  $('#dbq').value=q; $('#dbSearchRow').style.display='';
+  showSheet(true);
+  if(q) doDbSearch(); else $('#dbBody').innerHTML='<div class="empty">음식 이름을 입력하고 검색하세요.</div>';
+}
+async function doDbSearch(){
+  var q=$('#dbq').value.trim(); if(!q) return;
+  dbSel=null; $('#dbSearchRow').style.display='';
+  $('#dbBody').innerHTML='<div class="empty">검색 중...</div>';
+  try{
+    var items=await mfdsSearch(q);
+    items.sort(function(a,b){ return String(a.FOOD_NM_KR).length-String(b.FOOD_NM_KR).length; });
+    dbResults=items; renderDbList();
+  }catch(e){
+    $('#dbBody').innerHTML='<div class="empty status err">'+esc(e.message)+'</div>';
+  }
+}
+function renderDbList(){
+  if(!dbResults.length){ $('#dbBody').innerHTML='<div class="empty">검색 결과가 없어요. 다른 이름으로 찾아보세요.</div>'; return; }
+  $('#dbBody').innerHTML=dbResults.map(function(it,k){
+    var base=baseOf(it), u=unitOf(it), d=defAmount(it), v=calc(it,d), b=calc(it,base);
+    return '<button class="cand" data-k="'+k+'"><div><b>'+esc(it.FOOD_NM_KR||'')+'</b> <span class="muted">'+esc(it.DB_GRP_NM||'')+'</span></div>'+
+      '<div class="num">'+(d!==base?'1회 '+r0(d)+u+' 기준 ':'')+r0(v.kcal)+' kcal <span class="muted">(탄 '+r0(v.carb)+'g, 단 '+r0(v.protein)+'g, 지 '+r0(v.fat)+'g)</span>'+
+      (suspicious(v)?' <span class="warn">값 확인 필요</span>':'')+'</div>'+
+      '<div class="muted num">'+base+u+'당 '+r0(b.kcal)+' kcal</div></button>';
+  }).join('');
+}
+function renderDbDetail(){
+  var it=dbResults[dbSel], base=baseOf(it), u=unitOf(it);
+  var g=defAmount(it);
+  $('#dbSearchRow').style.display='none';
+  $('#dbBody').innerHTML='<div><b>'+esc(it.FOOD_NM_KR||'')+'</b></div>'+
+    '<div class="muted" style="margin-bottom:10px">'+base+u+' 기준 값에서 먹은 양만큼 계산해요. 처음 값은 1회 분량이에요.</div>'+
+    '<div class="field"><label for="dbGram">먹은 양 ('+u+')</label><input id="dbGram" type="number" inputmode="decimal" min="1" value="'+g+'"></div>'+
+    '<div class="ptotal num" id="dbCalc"></div>'+
+    '<div class="row"><button class="btn grow" id="dbApply">이 값으로 바꾸기</button><button class="btn ghost" id="dbBack">뒤로</button></div>';
+  updateDbCalc();
+}
+function curGram(){ var e=$('#dbGram'); return e?(parseFloat(e.value)||0):0; }
+function updateDbCalc(){
+  var it=dbResults[dbSel], v=calc(it,curGram());
+  $('#dbCalc').textContent=r0(v.kcal)+' kcal (탄 '+r0(v.carb)+'g, 단 '+r0(v.protein)+'g, 지 '+r0(v.fat)+'g)';
+}
+$('#dbGo').onclick=doDbSearch;
+$('#dbq').addEventListener('keydown',function(e){ if(e.key==='Enter') doDbSearch(); });
+$('#dbClose').onclick=function(){ showSheet(false); };
+$('#dbSheet').addEventListener('click',function(e){ if(e.target.id==='dbSheet') showSheet(false); });
+$('#dbBody').addEventListener('input',function(e){ if(e.target.id==='dbGram') updateDbCalc(); });
+$('#dbBody').addEventListener('click',function(e){
+  var cand=e.target.closest('.cand');
+  if(cand){ dbSel=+cand.dataset.k; renderDbDetail(); return; }
+  if(e.target.id==='dbBack'){ dbSel=null; $('#dbSearchRow').style.display=''; renderDbList(); return; }
+  if(e.target.id==='dbApply'){
+    var it=dbResults[dbSel], g=curGram();
+    if(!(g>0)){ toast('먹은 양을 입력해 주세요'); return; }
+    var v=calc(it,g);
+    preview[dbIdx]={name:(it.FOOD_NM_KR||'음식')+' ('+r0(g)+unitOf(it)+')',kcal:r0(v.kcal),carb:r0(v.carb),protein:r0(v.protein),fat:r0(v.fat)};
+    renderPreview(); showSheet(false); toast('DB 값으로 바꿨어요');
+  }
+});
+
+$('#testMfds').onclick=async function(){
+  var out=$('#testOut');
+  db.settings.mfdsKey=$('#mfdsKey').value.trim();
+  db.settings.mfdsProxy=$('#mfdsProxy').value.trim(); save();
+  out.textContent='확인 중...';
+  try{
+    var items=await mfdsSearch('짜장면');
+    if(!items.length){ out.textContent='연결은 됐지만 검색 결과가 없어요. 잠시 뒤 다시 시도해 보세요.'; return; }
+    var it=items[0], base=baseOf(it), v=calc(it,base);
+    out.textContent='연결 성공 ('+items.length+'건)\n'+
+      '첫 항목: '+(it.FOOD_NM_KR||'')+' / 기준 '+base+unitOf(it)+'\n'+
+      '에너지 '+r0(v.kcal)+' kcal, 탄수화물 '+r0(v.carb)+'g, 단백질 '+r0(v.protein)+'g, 지방 '+r0(v.fat)+'g\n'+
+      '원본값: '+NUT.kcal+'='+it[NUT.kcal]+', '+NUT.carb+'='+it[NUT.carb]+', '+NUT.protein+'='+it[NUT.protein]+', '+NUT.fat+'='+it[NUT.fat]+'\n'+
+      (suspicious(v)?'영양소 번호가 맞지 않을 수 있어요. 이 화면을 캡처해서 알려 주세요.':'영양소 값이 서로 맞아 보여요.')+
+      (v.kcal===0?'\n응답 항목: '+Object.keys(it).slice(0,40).join(', '):'');
+  }catch(e){ out.textContent=e.message; }
 };
 
 /* ---------- 홈 화면 아이콘 / 매니페스트 ---------- */
